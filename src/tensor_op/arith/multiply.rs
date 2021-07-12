@@ -1,10 +1,13 @@
 use crate::{
     tensor_grad::{
-        ir::mul::{suitable_for_broadcast, suitable_for_dot, suitable_for_hadamard},
+        ir::{
+            ethereal::EtherealTensor,
+            mul::{suitable_for_broadcast, suitable_for_dot, suitable_for_hadamard},
+        },
         tensor::{ArcTensor, ReadTensor},
     },
     tensor_op::{chain_gradient::ChainGradient, TensorIRStruct, TensorInput},
-    utility::{filled_tensor, ones, zeros},
+    utility::{filled_tensor, get_native_backend, identity, ones, zeros},
     NumCast,
 };
 use coaster::{IBackend, IFramework, SharedTensor};
@@ -19,7 +22,7 @@ use rand::{distributions::Standard, prelude::Distribution};
 use rust_blas::math::Trans;
 
 use crate::{tensor_grad::Tensor, tensor_op::operation::TensorOperation};
-use std::rc::Rc;
+use std::{mem::swap, rc::Rc};
 
 use super::Side;
 
@@ -27,6 +30,7 @@ use super::Side;
 pub(crate) enum MultiplicationType {
     Dot,
     Broadcast(Side),
+    Singleton(Side),
     Hadamard,
 }
 
@@ -116,6 +120,12 @@ where
     coaster::Backend<F>: IBackend + Axpy<T> + Asum<T> + Gemm<T>,
     ArcTensor<T, F>: ReadTensor<T>,
 {
+    println!(
+        "Broadcast Dot for LHS {:?} by RHS {:?} with Output Shape {:?}",
+        lhs.read(),
+        rhs.read(),
+        &output_shape
+    );
     let mut new_tensor = SharedTensor::new(&output_shape);
     (**backend)
         .gemm(
@@ -136,7 +146,57 @@ where
             &mut new_tensor,
         )
         .unwrap();
-    Tensor::new(new_tensor, output_shape, backend)
+    let output = Tensor::new(new_tensor, output_shape, backend);
+    dbg!(output.read());
+    output
+}
+
+fn scale<T, F>(
+    lhs: ArcTensor<T, F>,
+    transpose_lhs: bool,
+    scalar: ArcTensor<T, F>,
+    backend: &Rc<coaster::Backend<F>>,
+    output_shape: Vec<usize>,
+) -> ArcTensor<T, F>
+where
+    T: std::fmt::Debug
+        + std::fmt::Display
+        + NumCast
+        + One
+        + Zero
+        + num::traits::Pow<T, Output = T>
+        + Copy
+        + Real,
+    F: Clone + IFramework,
+    Standard: Distribution<T>,
+    coaster::Backend<F>: IBackend + Axpy<T> + Asum<T> + Gemm<T>,
+    ArcTensor<T, F>: ReadTensor<T>,
+{
+    let mut new_tensor = SharedTensor::new(&output_shape);
+    assert!(scalar.shape().iter().product::<usize>() == 1);
+    let identity_shape = match output_shape.len() {
+        2 => *output_shape.iter().last().unwrap(),
+        1 => 1,
+        _ => unimplemented!(),
+    };
+    let scale = scalar.read()[0];
+    (**backend)
+        .gemm(
+            &filled_tensor(backend, &[1], &[scale]),
+            if transpose_lhs {
+                Transpose::Trans
+            } else {
+                Transpose::NoTrans
+            },
+            &lhs.get_tensor().tensor,
+            Transpose::NoTrans,
+            &identity(identity_shape, &backend).get_tensor().tensor,
+            &zeros(backend, &[1]),
+            &mut new_tensor,
+        )
+        .unwrap();
+    let output = Tensor::new(new_tensor, output_shape, backend);
+    output
 }
 
 fn dot<T, F>(
@@ -210,8 +270,17 @@ where
 {
     fn to_string(&self) -> String {
         format!(
-            "A{} Mul B{}",
+            "A{} Mul ({}) B{}",
             if self.transpose_lhs { "ᵀ" } else { "" },
+            match self.multiplication_type {
+                MultiplicationType::Dot => ".",
+                MultiplicationType::Broadcast(_) => "b.",
+                MultiplicationType::Singleton(side) => match side {
+                    Side::Left => "sl",
+                    Side::Right => "sr",
+                },
+                MultiplicationType::Hadamard => "h",
+            },
             if self.transpose_rhs { "ᵀ" } else { "" }
         )
     }
@@ -276,6 +345,7 @@ where
         dbg!(self.multiplication_type);
         let output_shape = self.output_shape(Some(&lhs_shape), Some(&rhs_shape));
         dbg!(&output_shape);
+        // In backprop, it occasionally gets the wrong multiplication type by swapping LHS and RHS.
         match self.multiplication_type {
             MultiplicationType::Dot => {
                 assert_eq!(lhs_shape.last().unwrap(), rhs_shape.first().unwrap());
@@ -290,17 +360,6 @@ where
             }
             MultiplicationType::Broadcast(side) => match side {
                 Side::Left => {
-                    let output_shape = self.output_shape(Some(&lhs_shape), Some(&rhs_shape));
-                    broadcast_dot(
-                        lhs,
-                        rhs,
-                        backend,
-                        output_shape,
-                        self.transpose_lhs,
-                        self.transpose_rhs,
-                    )
-                }
-                Side::Right => {
                     let output_shape = self.output_shape(Some(&rhs_shape), Some(&lhs_shape));
                     broadcast_dot(
                         rhs,
@@ -311,46 +370,47 @@ where
                         self.transpose_lhs,
                     )
                 }
+                Side::Right => {
+                    let output_shape = self.output_shape(Some(&lhs_shape), Some(&rhs_shape));
+                    broadcast_dot(
+                        lhs,
+                        rhs,
+                        backend,
+                        output_shape,
+                        self.transpose_lhs,
+                        self.transpose_rhs,
+                    )
+                }
             },
             MultiplicationType::Hadamard => {
                 assert_eq!(lhs_shape, rhs_shape);
                 hadamard(lhs, rhs, backend)
             }
+            MultiplicationType::Singleton(side) => match side {
+                Side::Left => scale(rhs, self.transpose_rhs, lhs, backend, rhs_shape),
+                Side::Right => scale(lhs, self.transpose_lhs, rhs, backend, lhs_shape),
+            },
         }
     }
 
     fn grad(
         &self,
         seed: TensorIRStruct<T, F>,
-        lhs: TensorInput<T, F>,
+        _lhs: TensorInput<T, F>,
         other: TensorInput<T, F>,
         side: Side,
     ) -> TensorIRStruct<T, F> {
-        let grad = match lhs {
-            TensorInput::Op(_lhs_op) => match other {
-                TensorInput::Op(other_op) => Box::new(Box::new(*other_op).t()),
-                TensorInput::Tensor(other_tensor) => Box::new(other_tensor.t()),
-                TensorInput::EtherealTensor(other_e_tensor) => Box::new(other_e_tensor.t()),
-                TensorInput::None => unreachable!(),
-            },
-            TensorInput::Tensor(_lhs_tensor) => match other {
-                TensorInput::Op(other_op) => Box::new(Box::new(*other_op).t()),
-                TensorInput::Tensor(other_tensor) => Box::new(other_tensor.t()),
-                TensorInput::EtherealTensor(other_e_tensor) => Box::new(other_e_tensor.t()),
-                TensorInput::None => unreachable!(),
-            },
-            TensorInput::EtherealTensor(_e_tensor) => match other {
-                TensorInput::Op(other_op) => Box::new(Box::new(*other_op).t()),
-                TensorInput::Tensor(other_tensor) => Box::new(other_tensor.t()),
-                TensorInput::EtherealTensor(other_e_tensor) => Box::new(other_e_tensor.t()),
-                TensorInput::None => unreachable!(),
-            },
+        let grad = match other {
+            TensorInput::Op(other_op) => Box::new(Box::new(*other_op).t()),
+            TensorInput::Tensor(other_tensor) => Box::new(other_tensor.t()),
+            TensorInput::EtherealTensor(other_e_tensor) => Box::new(other_e_tensor.t()),
             TensorInput::None => unreachable!(),
         };
-        match side {
-            Side::Left => grad * seed,
-            Side::Right => seed * grad,
-        }
+        let output = match side {
+            Side::Left => seed * grad,
+            Side::Right => grad * seed,
+        };
+        output
     }
 }
 
@@ -380,7 +440,11 @@ mod test {
     #[test]
     fn check_multiply_dims() {
         let backend = Rc::new(get_native_backend());
-        let input = Tensor::new(filled_tensor(&backend, &[1], &[1.0]), vec![1], &backend);
+        let input = Tensor::new(
+            filled_tensor(&backend, &[1, 1], &[1.0]),
+            vec![1, 1],
+            &backend,
+        );
         let weight = Tensor::new(
             filled_tensor(
                 &backend,
@@ -449,7 +513,7 @@ mod test {
         );
         let weight = Tensor::new(
             filled_tensor(&backend, &[1, 1], &[2.0_f32]),
-            vec![1],
+            vec![1, 1],
             &backend,
         );
         let mut res = (&input) * (&weight);
@@ -478,7 +542,7 @@ mod test {
         .t();
         let weight = Tensor::new(
             filled_tensor(&backend, &[1, 1], &[2.0_f32]),
-            vec![1],
+            vec![1, 1],
             &backend,
         );
         let mut res = (&input) * (&weight);

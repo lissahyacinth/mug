@@ -40,6 +40,14 @@ where
             Box::new(TensorTranspose {}),
         )
     }
+
+    pub fn squeeze(&self, dimension: usize) -> TensorOp<T, F> {
+        TensorOp::new(
+            TensorInput::Op(Box::new(self.clone())),
+            TensorInput::None,
+            Box::new(TensorSqueeze { dimension }),
+        )
+    }
 }
 
 impl<T, F> ArcTensor<T, F>
@@ -60,6 +68,18 @@ where
 {
     pub fn t(&self) -> TensorIRStruct<T, F> {
         TensorIRStruct::new(self.clone(), None, Box::new(TensorTranspose {}))
+    }
+
+    pub fn squeeze(&self, dimension: usize) -> TensorIRStruct<T, F> {
+        TensorIRStruct::new(self.clone(), None, Box::new(TensorSqueeze::new(dimension)))
+    }
+
+    pub fn unsqueeze(&self, dimension: usize) -> TensorIRStruct<T, F> {
+        TensorIRStruct::new(
+            self.clone(),
+            None,
+            Box::new(TensorUnSqueeze::new(dimension)),
+        )
     }
 }
 
@@ -113,52 +133,6 @@ where
     }
 }
 
-impl<T, F> TensorOp<T, F>
-where
-    T: std::fmt::Debug
-        + std::fmt::Display
-        + Copy
-        + NumCast
-        + One
-        + Zero
-        + Real
-        + num::traits::Pow<T, Output = T>
-        + 'static,
-    F: IFramework + Clone + 'static,
-    Standard: Distribution<T>,
-    coaster::Backend<F>: IBackend + Axpy<T> + Asum<T> + Gemm<T>,
-    ArcTensor<T, F>: ReadTensor<T>,
-{
-    pub fn squeeze(&self, dimension: usize) -> TensorOp<T, F> {
-        TensorOp::new(
-            TensorInput::Op(Box::new(self.clone())),
-            TensorInput::None,
-            Box::new(TensorSqueeze { dimension }),
-        )
-    }
-}
-
-impl<T, F> ArcTensor<T, F>
-where
-    T: std::fmt::Debug
-        + std::fmt::Display
-        + Copy
-        + NumCast
-        + One
-        + Zero
-        + Real
-        + num::traits::Pow<T, Output = T>
-        + 'static,
-    F: IFramework + Clone + 'static,
-    Standard: Distribution<T>,
-    coaster::Backend<F>: IBackend + Axpy<T> + Asum<T> + Gemm<T>,
-    ArcTensor<T, F>: ReadTensor<T>,
-{
-    pub fn squeeze(&self, dimension: usize) -> TensorIRStruct<T, F> {
-        TensorIRStruct::new(self.clone(), None, Box::new(TensorSqueeze::new(dimension)))
-    }
-}
-
 impl<T, F> TensorIRStruct<T, F>
 where
     T: std::fmt::Debug
@@ -179,29 +153,8 @@ where
         self.clone()
             .scalar_op(Box::new(TensorUnSqueeze::new(dimension)))
     }
-}
 
-impl<T, F> ArcTensor<T, F>
-where
-    T: std::fmt::Debug
-        + std::fmt::Display
-        + Copy
-        + NumCast
-        + One
-        + Zero
-        + Real
-        + num::traits::Pow<T, Output = T>
-        + 'static,
-    F: IFramework + Clone + 'static,
-    Standard: Distribution<T>,
-    coaster::Backend<F>: IBackend + Axpy<T> + Asum<T> + Gemm<T>,
-    ArcTensor<T, F>: ReadTensor<T>,
-{
-    pub fn unsqueeze(&self, dimension: usize) -> TensorIRStruct<T, F> {
-        TensorIRStruct::new(
-            self.clone(),
-            None,
-            Box::new(TensorUnSqueeze::new(dimension)),
-        )
+    pub fn t(&self) -> TensorIRStruct<T, F> {
+        self.clone().scalar_op(Box::new(TensorTranspose {}))
     }
 }

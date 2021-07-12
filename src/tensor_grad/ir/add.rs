@@ -234,14 +234,18 @@ impl_add_for_op_ir_struct!(&TensorIRStruct<T, F>, TensorOp<T, F>);
 impl_add_for_op_ir_struct!(TensorIRStruct<T, F>, &TensorOp<T, F>);
 impl_add_for_op_ir_struct!(&TensorIRStruct<T, F>, &TensorOp<T, F>);
 
-fn find_add_type(lhs_shape: &[usize], rhs_shape: &[usize]) -> Result<AddType, IRError> {
-    if lhs_shape.len() != rhs_shape.len() {
+pub(crate) fn find_add_type(lhs_shape: &[usize], rhs_shape: &[usize]) -> Result<AddType, IRError> {
+    if lhs_shape == rhs_shape {
+        Ok(AddType::EqualSize)
+    } else if lhs_shape.iter().product::<usize>() == 1 {
+        Ok(AddType::Singleton(Side::Left))
+    } else if rhs_shape.iter().product::<usize>() == 1 {
+        Ok(AddType::Singleton(Side::Right))
+    } else if lhs_shape.len() != rhs_shape.len() {
         Err(IRError::InvalidInputs {
             ir_name: "Add".to_string(),
             inputs: (lhs_shape.to_vec(), rhs_shape.to_vec()),
         })
-    } else if lhs_shape == rhs_shape {
-        Ok(AddType::EqualSize)
     // Likely to be Broadcastable
     } else if lhs_shape
         .iter()
@@ -280,26 +284,26 @@ fn find_add_type(lhs_shape: &[usize], rhs_shape: &[usize]) -> Result<AddType, IR
 mod test {
     use super::*;
     #[test]
-    fn check_add_type_broadcast_col() {
+    fn check_add_type_singleton_col() {
         assert_eq!(
             find_add_type(&[1, 1], &[10, 1]).unwrap(),
-            AddType::BroadcastColumn(Side::Left)
+            AddType::Singleton(Side::Left)
         );
         assert_eq!(
             find_add_type(&[10, 1], &[1, 1]).unwrap(),
-            AddType::BroadcastColumn(Side::Right)
+            AddType::Singleton(Side::Right)
         );
     }
 
     #[test]
-    fn check_add_type_broadcast_row() {
+    fn check_add_type_singleton_row() {
         assert_eq!(
             find_add_type(&[1, 1], &[1, 10]).unwrap(),
-            AddType::BroadcastRow(Side::Left)
+            AddType::Singleton(Side::Left)
         );
         assert_eq!(
             find_add_type(&[1, 10], &[1, 1]).unwrap(),
-            AddType::BroadcastRow(Side::Right)
+            AddType::Singleton(Side::Right)
         );
     }
 }

@@ -25,12 +25,38 @@ use crate::{
 
 use super::{ethereal::EtherealTensor, transpose_shape};
 
+fn find_broadcast_side(lhs_shape: &[usize], rhs_shape: &[usize]) -> Side {
+    if lhs_shape.len() < rhs_shape.len() {
+        Side::Left
+    } else if rhs_shape.len() < lhs_shape.len() {
+        Side::Right
+    } else {
+        let modified_dimension = lhs_shape
+            .iter()
+            .enumerate()
+            .zip(rhs_shape.iter())
+            .filter(|((_, lhs), rhs)| lhs != rhs)
+            .map(|((idx, _), _)| idx)
+            .next()
+            .unwrap();
+        if lhs_shape[modified_dimension] == 1 {
+            Side::Left
+        } else {
+            Side::Right
+        }
+    }
+}
+
 pub(crate) fn find_mul_type(
     lhs_shape: &[usize],
     rhs_shape: &[usize],
     lhs_transpose: bool,
     rhs_transpose: bool,
 ) -> Result<MultiplicationType, IRError> {
+    println!(
+        "Finding Mult Type for {:?} (T :{}), {:?} (T :{})",
+        lhs_shape, lhs_transpose, rhs_shape, rhs_transpose,
+    );
     let lhs_shape = if lhs_transpose {
         transpose_shape(lhs_shape)
     } else {
@@ -50,26 +76,16 @@ pub(crate) fn find_mul_type(
         Ok(MultiplicationType::Dot)
     } else if suitable_for_hadamard(&lhs_shape, &rhs_shape) {
         Ok(MultiplicationType::Hadamard)
+    } else if suitable_for_broadcast(&lhs_shape, &rhs_shape)
+        & ((lhs_shape.iter().product::<usize>() == 1) | (rhs_shape.iter().product::<usize>() == 1))
+    {
+        Ok(MultiplicationType::Singleton(find_broadcast_side(
+            &lhs_shape, &rhs_shape,
+        )))
     } else if suitable_for_broadcast(&lhs_shape, &rhs_shape) {
-        if lhs_shape.len() < rhs_shape.len() {
-            Ok(MultiplicationType::Broadcast(Side::Left))
-        } else if rhs_shape.len() < lhs_shape.len() {
-            Ok(MultiplicationType::Broadcast(Side::Right))
-        } else {
-            let modified_dimension = lhs_shape
-                .iter()
-                .enumerate()
-                .zip(rhs_shape.iter())
-                .filter(|((_, lhs), rhs)| lhs != rhs)
-                .map(|((idx, _), _)| idx)
-                .next()
-                .unwrap();
-            if lhs_shape[modified_dimension] == 1 {
-                Ok(MultiplicationType::Broadcast(Side::Left))
-            } else {
-                Ok(MultiplicationType::Broadcast(Side::Right))
-            }
-        }
+        Ok(MultiplicationType::Broadcast(find_broadcast_side(
+            &lhs_shape, &rhs_shape,
+        )))
     } else {
         Err(IRError::InvalidInputs {
             ir_name: "Multiplication".to_string(),
@@ -264,7 +280,7 @@ macro_rules! impl_mul_for_op_ir_struct {
                 self.clone().op(
                     TensorInput::Op(rhs.clone()),
                     Box::new(TensorMul::new(T::one(), false, T::one(), false, mul_type)),
-                    OpSide::Left,
+                    OpSide::Right,
                 )
             }
         }
@@ -293,7 +309,7 @@ macro_rules! impl_mul_for_op_ir_struct {
                 rhs.clone().op(
                     TensorInput::Op(self.clone()),
                     Box::new(TensorMul::new(T::one(), false, T::one(), false, mul_type)),
-                    OpSide::Right,
+                    OpSide::Left,
                 )
             }
         }
@@ -489,7 +505,7 @@ mod test {
     fn check_mul_type_dot_broadcast() {
         assert_eq!(
             find_mul_type(&[1, 10], &[1, 1], false, false).unwrap(),
-            MultiplicationType::Broadcast(Side::Right)
+            MultiplicationType::Singleton(Side::Right)
         );
     }
 
@@ -497,7 +513,7 @@ mod test {
     fn check_mul_type_singleton() {
         assert_eq!(
             find_mul_type(&[10, 7], &[1], false, false).unwrap(),
-            MultiplicationType::Broadcast(Side::Right)
+            MultiplicationType::Singleton(Side::Right)
         );
     }
 }

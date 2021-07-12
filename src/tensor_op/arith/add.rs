@@ -18,7 +18,7 @@ use num_traits::real::Real;
 use rand::{distributions::Standard, prelude::Distribution};
 
 use crate::tensor_op::operation::TensorOperation;
-use std::{iter::repeat, rc::Rc};
+use std::{iter::repeat, mem::swap, ops::Add, rc::Rc};
 
 use super::Side;
 
@@ -26,6 +26,7 @@ use super::Side;
 pub(crate) enum AddType {
     BroadcastColumn(Side),
     BroadcastRow(Side),
+    Singleton(Side),
     EqualSize,
 }
 
@@ -214,6 +215,10 @@ where
                 Side::Right => lhs_shape.unwrap().to_vec(),
             },
             AddType::EqualSize => lhs_shape.unwrap().to_vec(),
+            AddType::Singleton(side) => match side {
+                Side::Left => rhs_shape.unwrap().to_vec(),
+                Side::Right => lhs_shape.unwrap().to_vec(),
+            },
         }
     }
 
@@ -248,6 +253,10 @@ where
                 }
             },
             AddType::EqualSize => add_equal_sized(lhs, rhs, self.rhs_scale, backend),
+            AddType::Singleton(side) => match side {
+                Side::Left => add_singleton(rhs, lhs, T::one(), backend),
+                Side::Right => add_singleton(lhs, rhs, T::one(), backend),
+            },
         }
     }
 
@@ -270,35 +279,42 @@ where
             TensorInput::EtherealTensor(tensor) => tensor.shape().to_vec(),
             TensorInput::None => unreachable!(),
         };
+
         dbg!(self.add_type);
+        dbg!(side);
+        dbg!(&lhs_shape);
+        dbg!(&other_shape);
         match self.add_type {
             AddType::BroadcastColumn(broadcast_side) => {
                 if side == broadcast_side {
-                    dbg!(&lhs_shape);
-                    dbg!(&other_shape);
-                    dbg!(broadcast_side);
-                    dbg!(side);
                     let tensor = EtherealTensor::new(
                         vec![T::one(); other_shape.iter().product::<usize>()],
                         vec![other_shape[1], other_shape[0]],
                     );
                     match side {
-                        Side::Left => println!(
-                            "Tensor Shape was {:?}, multiply by {:?}",
-                            tensor.shape(),
-                            seed.output_shape()
-                        ),
-                        Side::Right => println!(
-                            "Seed Shape was {:?}, multiply by {:?}",
-                            seed.output_shape(),
-                            tensor.shape(),
-                        ),
-                    }
-
-                    match side {
                         Side::Left => tensor * seed,
                         Side::Right => seed * tensor,
                     }
+                } else {
+                    seed
+                }
+            }
+            AddType::Singleton(broadcast_side) => {
+                if side == broadcast_side {
+                    let other_shape = if other_shape.len() == 1 {
+                        [other_shape[0], 1].to_vec()
+                    } else {
+                        other_shape
+                    };
+                    let tensor = EtherealTensor::new(
+                        vec![T::one(); other_shape[1]],
+                        vec![other_shape[1], 1],
+                    );
+                    let tensor_2 = EtherealTensor::new(
+                        vec![T::one(); other_shape[0]],
+                        vec![other_shape[0], 1],
+                    );
+                    ((seed * tensor).t()) * tensor_2
                 } else {
                     seed
                 }
@@ -408,10 +424,15 @@ mod test {
             vec![2, 3],
             &backend,
         );
-        let rhs_vector = Tensor::new(filled_tensor(&backend, &[1], &[1.0_f32]), vec![1], &backend);
+        let rhs_vector = Tensor::new(
+            filled_tensor(&backend, &[1, 1], &[1.0_f32]),
+            vec![1, 1],
+            &backend,
+        );
         let mut res = &lhs_matrix + &rhs_vector;
-        println!("{}", lhs_matrix);
-        println!("{}", res.evaluate(&backend));
+        println!("LHS Input {}", lhs_matrix);
+        println!("RHS Input {}", rhs_vector);
+        println!("Output: {}", res.evaluate(&backend));
         assert_eq!(
             res.evaluate(&backend).read(),
             vec![2.0f32, 3.0, 4.0, 5.0, 6.0, 7.0]

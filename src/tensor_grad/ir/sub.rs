@@ -161,13 +161,18 @@ impl_sub_for_op_tensor!(&mut ArcTensor<T, F>, TensorIRStruct<T, F>);
 impl_sub_for_op_tensor!(&mut ArcTensor<T, F>, &TensorIRStruct<T, F>);
 
 fn find_sub_type(lhs_shape: &[usize], rhs_shape: &[usize]) -> Result<AddType, IRError> {
-    if lhs_shape.len() != rhs_shape.len() {
+    if lhs_shape == rhs_shape {
+        Ok(AddType::EqualSize)
+    } else if lhs_shape.iter().product::<usize>() == 1 {
+        Ok(AddType::Singleton(Side::Left))
+    } else if rhs_shape.iter().product::<usize>() == 1 {
+        Ok(AddType::Singleton(Side::Right))
+    } else if lhs_shape.len() != rhs_shape.len() {
         Err(IRError::InvalidInputs {
             ir_name: "Sub".to_string(),
             inputs: (lhs_shape.to_vec(), rhs_shape.to_vec()),
         })
-    } else if lhs_shape == rhs_shape {
-        Ok(AddType::EqualSize)
+    // Likely to be Broadcastable
     } else if lhs_shape
         .iter()
         .zip(rhs_shape.iter())
@@ -176,41 +181,22 @@ fn find_sub_type(lhs_shape: &[usize], rhs_shape: &[usize]) -> Result<AddType, IR
         .count()
         == 0
     {
-        if lhs_shape
+        let index = lhs_shape
             .iter()
+            .enumerate()
             .zip(rhs_shape.iter())
-            .filter(|(a, b)| a != b)
-            .filter(|(a, _)| **a != 1)
-            .count()
-            > 0
-        {
-            match lhs_shape
-                .iter()
-                .enumerate()
-                .zip(rhs_shape.iter())
-                .filter(|((_, a), b)| a != b)
-                .map(|((index, _), _)| index)
-                .next()
-                .unwrap()
-            {
-                0 => Ok(AddType::BroadcastColumn(Side::Right)),
-                1 => Ok(AddType::BroadcastRow(Side::Right)),
-                _ => unimplemented!(),
-            }
+            .filter(|((_, a), b)| a != b)
+            .map(|((index, _), _)| index)
+            .next()
+            .unwrap();
+        if (lhs_shape[index] == 1) & (index == 0) {
+            Ok(AddType::BroadcastColumn(Side::Left))
+        } else if lhs_shape[index] == 1 {
+            Ok(AddType::BroadcastRow(Side::Left))
+        } else if index == 0 {
+            Ok(AddType::BroadcastColumn(Side::Right))
         } else {
-            match rhs_shape
-                .iter()
-                .enumerate()
-                .zip(lhs_shape.iter())
-                .filter(|((_, a), b)| a != b)
-                .map(|((index, _), _)| index)
-                .next()
-                .unwrap()
-            {
-                0 => Ok(AddType::BroadcastColumn(Side::Left)),
-                1 => Ok(AddType::BroadcastRow(Side::Left)),
-                _ => unimplemented!(),
-            }
+            Ok(AddType::BroadcastRow(Side::Right))
         }
     } else {
         Err(IRError::InvalidInputs {

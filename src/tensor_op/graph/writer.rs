@@ -88,7 +88,7 @@ where
     let mut shift = 0;
     for r_match in rhs_match.iter() {
         if lhs_coordinates.contains(&(r_match.level, r_match.horizon_coord)) {
-            shift += 1;
+            shift += 2;
         }
     }
 
